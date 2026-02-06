@@ -15,7 +15,7 @@ from scipy.spatial import cKDTree
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QFileDialog, QHBoxLayout, QVBoxLayout, QGroupBox,
-    QComboBox, QDoubleSpinBox, QFormLayout
+    QComboBox, QDoubleSpinBox, QFormLayout, QMessageBox
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
@@ -88,6 +88,8 @@ class FFTGeoscience(QMainWindow):
 
         self.df = None
         self.image = None
+        self.base_image = None
+        self.working_image = None
         self.last_output = None
         self.src_profile = None
 
@@ -145,8 +147,8 @@ class FFTGeoscience(QMainWindow):
         csv_box = QGroupBox("CSV → Grid")
         csv_form = QFormLayout(csv_box)
 
-        self.csv_btn = QPushButton("Load CSV")
-        self.csv_btn.clicked.connect(self.load_csv)
+        self.csv_btn = QPushButton("Load CSV / TXT")
+        self.csv_btn.clicked.connect(self.load_table)
 
         self.x_cb = QComboBox()
         self.y_cb = QComboBox()
@@ -241,6 +243,10 @@ class FFTGeoscience(QMainWindow):
         self.apply_btn.clicked.connect(self.apply_filter)
         self.apply_btn.setEnabled(False)
 
+        self.reset_btn = QPushButton("Reset To Original Grid")
+        self.reset_btn.clicked.connect(self.reset_to_original)
+        self.reset_btn.setEnabled(False)
+
         self.save_btn = QPushButton("Save Output")
         self.save_btn.clicked.connect(self.save_output)
         self.save_btn.setEnabled(False)
@@ -250,6 +256,7 @@ class FFTGeoscience(QMainWindow):
         ctrl.addWidget(self.filter_box)
         ctrl.addWidget(param_box)
         ctrl.addWidget(self.apply_btn)
+        ctrl.addWidget(self.reset_btn)
         ctrl.addWidget(self.save_btn)
         ctrl.addStretch()
 
@@ -285,12 +292,21 @@ class FFTGeoscience(QMainWindow):
 
     # CSV → GRID
    
-    def load_csv(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open CSV", "", "CSV (*.csv)")
+    def load_table(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open CSV / TXT",
+            "",
+            "Data files (*.csv *.txt);;CSV (*.csv);;Text (*.txt)"
+        )
         if not path:
             return
 
-        self.df = pd.read_csv(path)
+        self.df = pd.read_csv(path, sep=None, engine="python")
+
+        if self.df.shape[1] <= 1:
+            self.df = pd.read_csv(path, delim_whitespace=True)
+
         cols = list(self.df.columns)
 
         self.x_cb.clear()
@@ -302,6 +318,10 @@ class FFTGeoscience(QMainWindow):
         self.z_cb.addItems(cols)
 
     def create_grid_from_csv(self):
+        if self.df is None:
+            QMessageBox.warning(self, "No table loaded", "Please load a CSV or TXT file first.")
+            return
+
         MIN_CELL = 0.01  # hard safety limit (meters or degrees)
 
         x = self.df[self.x_cb.currentText()].values
@@ -320,7 +340,7 @@ class FFTGeoscience(QMainWindow):
 
         gx, gy = create_grid(x.min(), x.max(), y.min(), y.max(), cell)
 
-        if self.grid_method.currentText() == "nearest":
+        if self.grid_method.currentText() == "IDW":
             grid = idw(x, y, z, gx, gy)
         else:
             grid = griddata((x, y), z, (gx, gy),
@@ -331,11 +351,13 @@ class FFTGeoscience(QMainWindow):
 
         transform = from_origin(
             x.min(), y.max(),
-            self.cell_size.value(),
-            self.cell_size.value()
+            cell,
+            cell
         )
 
         self.image = grid
+        self.base_image = grid.copy()
+        self.working_image = grid.copy()
         self.src_profile = {
             "driver": "GTiff",
             "height": grid.shape[0],
@@ -349,6 +371,7 @@ class FFTGeoscience(QMainWindow):
         self.display(self.prepare_display(grid), self.input_label)
         self.update_colorbar()
         self.apply_btn.setEnabled(True)
+        self.reset_btn.setEnabled(True)
 
     # RASTER LOAD
     
@@ -365,16 +388,23 @@ class FFTGeoscience(QMainWindow):
         data -= np.mean(data)
 
         self.image = data
+        self.base_image = data.copy()
+        self.working_image = data.copy()
         self.display(self.prepare_display(data), self.input_label)
         self.update_colorbar()
         self.apply_btn.setEnabled(True)
+        self.reset_btn.setEnabled(True)
 
     
     # FFT FILTER ENGINE
     
     def apply_filter(self):
 
-        img = self.image.copy()
+        if self.working_image is None:
+            QMessageBox.warning(self, "No grid loaded", "Load or create a grid before applying filters.")
+            return
+
+        img = self.working_image.copy()
         rows, cols = img.shape
 
         img *= np.outer(np.hanning(rows), np.hanning(cols))
@@ -454,9 +484,21 @@ class FFTGeoscience(QMainWindow):
     # --------------------------------------------------------
     def finalize(self, out):
         self.last_output = out
+        self.working_image = out.copy()
+        self.image = self.working_image
+        self.display(self.prepare_display(self.working_image), self.input_label)
         self.display(self.prepare_display(out), self.output_label)
         self.update_colorbar()
         self.save_btn.setEnabled(True)
+
+    def reset_to_original(self):
+        if self.base_image is None:
+            return
+        self.working_image = self.base_image.copy()
+        self.image = self.base_image.copy()
+        self.last_output = None
+        self.display(self.prepare_display(self.working_image), self.input_label)
+        self.output_label.setText("Output")
 
     # --------------------------------------------------------
     def prepare_display(self, img):
